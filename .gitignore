@@ -324,3 +324,5 @@ TSWLatexianTemp*
 
 # Makeindex log files
 *.lpz
+*.iml
+*.xml

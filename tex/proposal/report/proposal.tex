@@ -1,4 +1,4 @@
-\documentclass[notitlepage]{article}
+\documentclass{article}
 \usepackage{amsmath}
 \title{CSE521S Project Proposal}
 \author{Bryan Orabutt, Gan Xu}
@@ -6,13 +6,18 @@
 
 \begin{document}
 \maketitle 
+\newpage
 \section*{Project Description}
 
+Our project idea is to make an automated pet feeder that uses AWS and an Amazon Echo device to allow users to schedule pet feedings for their pets. Using an Alexa, a user can set times to feed their pet each day, as well as a specified amount of food to feed each pet. Each automated food dispenser will dispense this amount of food at the requested time.\\\\\noindent
+We also want to provide useful information back to the user about their pet's eating habits. We want to be able to notify the user when the dispenser is low on food, when the next feeding will be, and when the last feeding was. We also want to use machine learning techniques to offer some insight about their pets health. We record a pets typical feeding habits and see how quickly it eats it's food, and how often it leaves food left in the bowl. With this information we can determine a pets general eating habits and let the pet owner know if their pet is displaying atypical eating patterns that may indicate a health issue.
+
 \section*{Responsibilities}
+Bryan will be responsible for the mechanical design and fabrication of parts due to his experience with 3D CAD tools and 3D printing. He will also lead the development of embedded systems code for the ESP32 micro-controller.  Gan will focus on developing machine learning tools to determine information about pet health. Both of us will work together to implement other data analytic tools for the end user. Such as the Amazon Alexa integration, and some mechanism for providing data to the user, such as a mobile app or email notification.
 
 \section*{Equipment}
 \begin{itemize}
-\item IoT capable micro-controller or single board computer.
+\item IoT capable micro-controller or single board computer (either ESP32 or Raspberry Pi).
 \item Power supply or batteries + regulator circuit
 \item Amazon echo
 \item Servo or stepper motor

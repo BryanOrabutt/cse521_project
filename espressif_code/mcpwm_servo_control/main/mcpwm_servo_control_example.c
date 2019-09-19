@@ -45,7 +45,7 @@ static uint32_t servo_per_degree_init(uint32_t degree_of_rotation)
     return cal_pulsewidth;
 }
 
-void servo_set(void* arg)
+void servo_set(TimerHandle_t xTimer)
 {
 	uint32_t angle;
 	if(flag)

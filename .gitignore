@@ -329,3 +329,6 @@ TSWLatexianTemp*
 *.pem
 *.crt
 *.key
+
+# Build
+build/

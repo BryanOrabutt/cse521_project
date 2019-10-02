@@ -1,3 +1,4 @@
+
 /*
  * Copyright 2010-2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * Additions Copyright 2016 Espressif Systems (Shanghai) PTE LTD
@@ -82,8 +83,8 @@ static EventGroupHandle_t wifi_event_group;
    to the AP with an IP? */
 const int CONNECTED_BIT = BIT0;
 
-static QueueHandle_t msg_queue;
-
+static QueueHandle_t rx_queue;
+static QueueHandle_t tx_queue;
 
 /* CA Root certificate, device ("Thing") certificate and device
  * ("Thing") key.
@@ -121,6 +122,10 @@ static char sample_weight = 0;
 static char sample_motion = 0;
 static int dispense_amount = 0;
 
+static int weight = 0;
+static int motion = 0;
+
+
 
 /**
  * @brief Default MQTT HOST URL is pulled from the aws_iot_config.h
@@ -132,7 +137,6 @@ char HostAddress[255] = AWS_IOT_MQTT_HOST;
  */
 uint32_t port = AWS_IOT_MQTT_PORT;
 
-static uint32_t angle = 0;
 
 static esp_err_t event_handler(void *ctx, system_event_t *event)
 {
@@ -159,7 +163,6 @@ void parse_json(void* params)
 {
     cJSON* json_parser = NULL; //root of JSON key:value tree
     cJSON* object = NULL; //JSON object handle
-    cJSON* item = NULL; //json item handle
     char msg[100]; //xQueue message handle
     char valid = 0; //Valid flag for logging
     
@@ -173,7 +176,7 @@ void parse_json(void* params)
     while(1)
     {
         //check if Queue has msg, wait one tick
-        if(xQueueReceive(msg_queue, msg, (TickType_t) 1))
+        if(xQueueReceive(rx_queue, msg, (TickType_t) 1))
         {      
             ESP_LOGI(TAG, "JSON received: \n%.*s", strlen(msg), msg);
             json_parser = cJSON_Parse(msg); //create cJSON tree from message
@@ -257,10 +260,10 @@ void parse_json(void* params)
                 ESP_LOGE(TAG, "Invalid request from AWS.\n");
             }
         }
-        else
+       /* else
         {
             ESP_LOGI(TAG, "xQueue empty");
-        }
+        }*/
     }
 }
 
@@ -277,24 +280,60 @@ static uint32_t servo_per_degree_init(uint32_t degree_of_rotation)
     return cal_pulsewidth;
 }
 
-void servo_handler(char* payload, int payload_len)
+void dispense_task(void* params)
 {
-	printf("Payload: %.*s\n", payload_len, payload);
+    uint32_t pw = 0;
+    while(1)
+    {
+        if(time_dispense)
+        {
+            ESP_LOGI(TAG, "Dispensing %d grams of food", dispense_amount);
+            
+            pw = servo_per_degree_init(SERVO_MAX_DEGREE);
+            mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, pw);
+            vTaskDelay(1000/portTICK_RATE_MS); //TODO: read adc until desired weight
+            pw = servo_per_degree_init(0);
+            mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, pw);
+           
+            time_dispense = 0;
+        }
+        
+        vTaskDelay(1000/portTICK_RATE_MS);
+            
+    }
+}
 
-	int x = sscanf(payload, "%d", &angle);
-	if(!x) 
-	{
-		ESP_LOGW(TAG, "Servo angle not read\n");
-	}
+void motion_task(void* params)
+{
+    char id = 'm';
+    while(1)
+    {
+        if(sample_motion)
+        {
+            ESP_LOGI(TAG, "Reading motion sensor: %d", motion);
+            xQueueSend(tx_queue, (void*)&id, (TickType_t)0);
+            sample_motion = 0;
+        }
+        
+        vTaskDelay(1000/portTICK_RATE_MS);
+    }
+}
 
-	if(angle > SERVO_MAX_DEGREE)
-	{
-		angle = 0;
-		ESP_LOGW(TAG, "Servo angle must be between 0 and 180 degrees! Sertting angle to 0 degrees.\n");
-	}
-
-	uint32_t pw = servo_per_degree_init(angle);
-	mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, pw);
+void weight_task(void* params)
+{
+    char id = 'w';
+    while(1)
+    {
+        if(sample_weight)
+        {
+            //TODO implement ADC sampling
+            ESP_LOGI(TAG, "Reading weight sensor: %d", weight);
+            xQueueSend(tx_queue, (void*)&id, (TickType_t)0);
+            sample_weight = 0;
+        }
+        
+        vTaskDelay(1000/portTICK_RATE_MS);
+    }
 }
 
 void iot_subscribe_callback_handler(AWS_IoT_Client *pClient, char *topicName, uint16_t topicNameLen,
@@ -302,7 +341,7 @@ void iot_subscribe_callback_handler(AWS_IoT_Client *pClient, char *topicName, ui
     ESP_LOGI(TAG, "Subscribe callback");
     ESP_LOGI(TAG, "%.*s\t%.*s", topicNameLen, topicName, (int) params->payloadLen, (char *)params->payload);
     
-    xQueueSend(msg_queue, (void*)params->payload, (TickType_t) 0);
+    xQueueSend(rx_queue, (void*)params->payload, (TickType_t) 0);
 	//parse_json((char*)params->payload;
 }
 
@@ -330,7 +369,12 @@ void disconnectCallbackHandler(AWS_IoT_Client *pClient, void *data) {
 void aws_iot_task(void *param) {
     char cPayload[100];
 
-    int32_t i = 0;
+    //int32_t i = 0;
+    cJSON* msg_for_aws = NULL;
+    cJSON* data = NULL;
+    char id;
+    char* str;
+        
 
     IoT_Error_t rc = FAILURE;
 
@@ -430,18 +474,9 @@ void aws_iot_task(void *param) {
         abort();
     }
 
-    sprintf(cPayload, "%s : %d ", "hello from SDK", i);
-
     paramsQOS0.qos = QOS0;
     paramsQOS0.payload = (void *) cPayload;
     paramsQOS0.isRetained = 0;
-
-    paramsQOS1.qos = QOS1;
-    paramsQOS1.payload = (void *) cPayload;
-    paramsQOS1.isRetained = 0;
-
-    ESP_LOGI(TAG, "Creating JSON parsing task");
-    xTaskCreate(&parse_json, "parse_json_task", 5000, NULL, 4, NULL);
     
     while((NETWORK_ATTEMPTING_RECONNECT == rc || NETWORK_RECONNECTED == rc || SUCCESS == rc)) {
 
@@ -454,13 +489,33 @@ void aws_iot_task(void *param) {
 
         ESP_LOGI(TAG, "Stack remaining for task '%s' is %d bytes", pcTaskGetTaskName(NULL), uxTaskGetStackHighWaterMark(NULL));
         vTaskDelay(1000 / portTICK_RATE_MS);
-        sprintf(cPayload, "%s : %d ", "hello from ESP32 (QOS0)", i++);
+        
+        msg_for_aws = cJSON_CreateObject();
+        data = cJSON_CreateNumber(1);
+        cJSON_AddItemToObject(msg_for_aws, "heartbeat", data);
+        
+        while(xQueueReceive(tx_queue, &id, (TickType_t) 1))
+        {
+            ESP_LOGI(TAG, "Received item in txQueue: %c", id);
+            if(id == 'w')
+            {
+                data = cJSON_CreateNumber(weight);
+                cJSON_AddItemToObject(msg_for_aws, "weight", data); 
+            }
+            else if (id == 'm')
+            {
+                data = cJSON_CreateNumber(motion);
+                cJSON_AddItemToObject(msg_for_aws, "motion", data);
+            }
+        }
+        
+        str = cJSON_Print(msg_for_aws);
+        snprintf(cPayload, 100, "%s", str);
         paramsQOS0.payloadLen = strlen(cPayload);
         rc = aws_iot_mqtt_publish(&client, TOPIC_PUB, TOPIC_PUB_LEN, &paramsQOS0);
-
-        sprintf(cPayload, "%s : %d ", "hello from ESP32 (QOS1)", i++);
-        paramsQOS1.payloadLen = strlen(cPayload);
-        rc = aws_iot_mqtt_publish(&client, TOPIC_PUB, TOPIC_PUB_LEN, &paramsQOS1);
+        
+        cJSON_Delete(msg_for_aws);
+        
         if (rc == MQTT_REQUEST_TIMEOUT_ERROR) {
             ESP_LOGW(TAG, "QOS1 publish ack not received.");
             rc = SUCCESS;
@@ -502,9 +557,10 @@ void app_main()
     }
     ESP_ERROR_CHECK( err );
     
-    msg_queue = xQueueCreate(5, 100*sizeof(char));
+    rx_queue = xQueueCreate(5, 100*sizeof(char));
+    tx_queue = xQueueCreate(10, sizeof(char));
     
-    if(msg_queue == 0)
+    if(rx_queue == 0)
     {
         ESP_LOGE(TAG, "Failed to create message queue");
     }
@@ -523,5 +579,12 @@ void app_main()
     mcpwm_init(MCPWM_UNIT_0, MCPWM_TIMER_0, &pwm_config);    //Configure PWM0A & PWM0B with above settings
 
     initialise_wifi();
-    xTaskCreatePinnedToCore(&aws_iot_task, "aws_iot_task", 9216, NULL, 5, NULL, 1);
+    xTaskCreatePinnedToCore(&aws_iot_task, "aws_iot_task", 9516, NULL, 5, NULL, 1);
+    
+    ESP_LOGI(TAG, "Creating JSON parsing task");
+    xTaskCreate(&parse_json, "parse_json_task", 5000, NULL, 4, NULL);
+    
+    xTaskCreate(&dispense_task, "dispenser_task", 2000, NULL, 4, NULL);
+    xTaskCreate(&motion_task, "motion_task", 2000, NULL, 4, NULL);
+    xTaskCreate(&weight_task, "weight_task", 2000, NULL, 4, NULL);
 }

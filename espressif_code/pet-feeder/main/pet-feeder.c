@@ -15,11 +15,11 @@
  * permissions and limitations under the License.
  */
 /**
- * @file subscribe_publish_sample.c
- * @brief simple MQTT publish and subscribe on the same topic
+ * @file pet-feeder.c
+ * @brief Waits for JSON from AWS and determines whether to dispense food or now. Enters low power when not dispensing or transmitting.
  *
  * This example takes the parameters from the build configuration and establishes a connection to the AWS IoT MQTT Platform.
- * It subscribes and publishes to the same topic - "test_topic/esp32"
+ * It subscribes to topic "pet-feeder/from_aws" and publishes to topic "pet-feeder/to_aws"
  *
  * Some setup is required. See example README for details.
  *
@@ -57,8 +57,7 @@
 #include "../../json/cJSON/cJSON.h"
 
 static const char *TAG = "pet-feeder";
-
-//static TaskHandle_t servo_handle;
+const static int serial_num = 123456;
 
 /* The examples use simple WiFi configuration that you can set via
    'make menuconfig'.
@@ -119,13 +118,11 @@ static const char * ROOT_CA_PATH = CONFIG_EXAMPLE_ROOT_CA_PATH;
 
 static char time_dispense = 0;
 static char sample_weight = 0;
-static char sample_motion = 0;
 static int dispense_amount = 0;
 
 static int weight = 0;
-static int motion = 0;
 
-
+static TimerHandle_t heartbeat_timer;
 
 /**
  * @brief Default MQTT HOST URL is pulled from the aws_iot_config.h
@@ -163,6 +160,7 @@ void parse_json(void* params)
 {
     cJSON* json_parser = NULL; //root of JSON key:value tree
     cJSON* object = NULL; //JSON object handle
+    cJSON* item = NULL; //JSON item handle
     char msg[100]; //xQueue message handle
     char valid = 0; //Valid flag for logging
     
@@ -193,29 +191,20 @@ void parse_json(void* params)
             
             //Point object handle at request objects
             object = cJSON_GetObjectItemCaseSensitive(json_parser, "request");
-            if (cJSON_IsString(object) && (object->valuestring != NULL))
+            if (object)
             {
                 ESP_LOGI(TAG, "Received request from AWS");
-                
-                //iterate over request objects
-                while(object)
+                cJSON_ArrayForEach(item, object)
                 {
                     //set time_dispense flag for dispenser() vTask
-                    if(strncmp(object->valuestring, "dispense", 10) == 0)
+                    if(strncmp(item->valuestring, "dispense", 10) == 0)
                     {
                         ESP_LOGI(TAG, "Dispense requested");
                         time_dispense = 1;
                         valid = 1;
                     }
-                    //set sample_motion flag for motion_sensor() vTask
-                    else if(strncmp(object->valuestring, "motion", 10) == 0)
-                    {
-                        ESP_LOGI(TAG, "Motion requested");
-                        sample_motion = 1;
-                        valid = 1;
-                    }
                     //set sample_weight flag for weight_sensor() vTask
-                    else if(strncmp(object->valuestring, "weight", 10) == 0)
+                    else if(strncmp(item->valuestring, "weight", 10) == 0)
                     {
                         ESP_LOGI(TAG, "Weight requested");
                         sample_weight = 1;
@@ -226,9 +215,11 @@ void parse_json(void* params)
                     {
                         valid = 0;
                     }
-
-                    object = object->next;
                 }
+            }
+            else
+            {
+                valid = 0;
             }
             
             //point object handle at update objects
@@ -244,6 +235,17 @@ void parse_json(void* params)
             {
                 valid = 0;
             }
+            
+            object = cJSON_GetObjectItemCaseSensitive(json_parser, "status");
+            if(cJSON_IsNumber(object) && (object->valueint == 1))
+            {
+                ESP_LOGI(TAG, "Received heartbeat from AWS");
+                valid = 1;
+            }
+            else if(object)
+            {
+                valid = 0;
+            }
                        
             //free JSON tree
             cJSON_Delete(json_parser);
@@ -252,7 +254,8 @@ void parse_json(void* params)
             if(valid)
             {
                 valid = 0;
-                ESP_LOGI(TAG, "State: time_dispense = %d\t sample_motion = %d\t sample_weight = %d\t dispense_amount = %d", time_dispense, sample_motion, sample_weight, dispense_amount);
+                ESP_LOGI(TAG, "State: time_dispense = %d\t sample_weight = %d\t dispense_amount = %d", time_dispense, sample_weight, dispense_amount);
+                xTimerReset(heartbeat_timer, 10);
             }
             //invalid JSON, log error
             else
@@ -280,9 +283,17 @@ static uint32_t servo_per_degree_init(uint32_t degree_of_rotation)
     return cal_pulsewidth;
 }
 
+void heartbeat_timeout(TimerHandle_t xTimer)
+{
+    ESP_LOGW(TAG, "The dispenser has not heard from AWS in over 15 minutes. Dispensing food now...");
+    time_dispense = 1;
+    xTimerReset(heartbeat_timer, 10);
+}
+
 void dispense_task(void* params)
 {
     uint32_t pw = 0;
+    char id = 'd';
     while(1)
     {
         if(time_dispense)
@@ -296,26 +307,11 @@ void dispense_task(void* params)
             mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, pw);
            
             time_dispense = 0;
+            xQueueSend(tx_queue, (void*)&id, (TickType_t)0);
         }
         
         vTaskDelay(1000/portTICK_RATE_MS);
             
-    }
-}
-
-void motion_task(void* params)
-{
-    char id = 'm';
-    while(1)
-    {
-        if(sample_motion)
-        {
-            ESP_LOGI(TAG, "Reading motion sensor: %d", motion);
-            xQueueSend(tx_queue, (void*)&id, (TickType_t)0);
-            sample_motion = 0;
-        }
-        
-        vTaskDelay(1000/portTICK_RATE_MS);
     }
 }
 
@@ -341,7 +337,10 @@ void iot_subscribe_callback_handler(AWS_IoT_Client *pClient, char *topicName, ui
     ESP_LOGI(TAG, "Subscribe callback");
     ESP_LOGI(TAG, "%.*s\t%.*s", topicNameLen, topicName, (int) params->payloadLen, (char *)params->payload);
     
-    xQueueSend(rx_queue, (void*)params->payload, (TickType_t) 0);
+    char msg[200];
+    strncpy(msg, params->payload, params->payloadLen);
+    strcat(msg, "\0");
+    xQueueSend(rx_queue, (void*)msg, (TickType_t) 0);
 	//parse_json((char*)params->payload;
 }
 
@@ -383,7 +382,7 @@ void aws_iot_task(void *param) {
     IoT_Client_Connect_Params connectParams = iotClientConnectParamsDefault;
 
     IoT_Publish_Message_Params paramsQOS0;
-    IoT_Publish_Message_Params paramsQOS1;
+   // IoT_Publish_Message_Params paramsQOS1;
 
     ESP_LOGI(TAG, "AWS IoT SDK Version %d.%d.%d-%s", VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH, VERSION_TAG);
 
@@ -488,7 +487,7 @@ void aws_iot_task(void *param) {
         }
 
         ESP_LOGI(TAG, "Stack remaining for task '%s' is %d bytes", pcTaskGetTaskName(NULL), uxTaskGetStackHighWaterMark(NULL));
-        vTaskDelay(1000 / portTICK_RATE_MS);
+        vTaskDelay(5000 / portTICK_RATE_MS);
         
         msg_for_aws = cJSON_CreateObject();
         data = cJSON_CreateNumber(1);
@@ -502,10 +501,10 @@ void aws_iot_task(void *param) {
                 data = cJSON_CreateNumber(weight);
                 cJSON_AddItemToObject(msg_for_aws, "weight", data); 
             }
-            else if (id == 'm')
+            else if(id == 'd')
             {
-                data = cJSON_CreateNumber(motion);
-                cJSON_AddItemToObject(msg_for_aws, "motion", data);
+                data = cJSON_CreateString("ready");
+                cJSON_AddItemToObject(msg_for_aws, "status", data);
             }
         }
         
@@ -557,7 +556,7 @@ void app_main()
     }
     ESP_ERROR_CHECK( err );
     
-    rx_queue = xQueueCreate(5, 100*sizeof(char));
+    rx_queue = xQueueCreate(5, 200*sizeof(char));
     tx_queue = xQueueCreate(10, sizeof(char));
     
     if(rx_queue == 0)
@@ -577,6 +576,9 @@ void app_main()
     pwm_config.counter_mode = MCPWM_UP_COUNTER;
     pwm_config.duty_mode = MCPWM_DUTY_MODE_0;
     mcpwm_init(MCPWM_UNIT_0, MCPWM_TIMER_0, &pwm_config);    //Configure PWM0A & PWM0B with above settings
+    
+    
+	heartbeat_timer = xTimerCreate("heartbeat_timer", pdMS_TO_TICKS(900000), pdTRUE, (void*) 0, heartbeat_timeout);
 
     initialise_wifi();
     xTaskCreatePinnedToCore(&aws_iot_task, "aws_iot_task", 9516, NULL, 5, NULL, 1);
@@ -585,6 +587,5 @@ void app_main()
     xTaskCreate(&parse_json, "parse_json_task", 5000, NULL, 4, NULL);
     
     xTaskCreate(&dispense_task, "dispenser_task", 2000, NULL, 4, NULL);
-    xTaskCreate(&motion_task, "motion_task", 2000, NULL, 4, NULL);
     xTaskCreate(&weight_task, "weight_task", 2000, NULL, 4, NULL);
 }

@@ -42,6 +42,8 @@
 #include "esp_vfs_fat.h"
 #include "driver/sdmmc_host.h"
 
+#include "driver/gpio.h"
+
 #include "nvs.h"
 #include "nvs_flash.h"
 
@@ -55,6 +57,17 @@
 #include "soc/mcpwm_struct.h"
 
 #include "../../json/cJSON/cJSON.h"
+
+#define NOP() asm volatile ("nop")
+#define WS_BASELINE 400000.0
+#define WS_BASELINE_GRAMS 50.0
+#define WS_EN 21
+#define SRV_EN 17
+#define WS_SCK 2
+#define WS_DT 15
+#define AMP_EN 22
+#define SRV0 18
+#define SRV1 19
 
 static const char *TAG = "pet-feeder";
 const static int serial_num = 123456;
@@ -119,8 +132,7 @@ static const char * ROOT_CA_PATH = CONFIG_EXAMPLE_ROOT_CA_PATH;
 static char time_dispense = 0;
 static char sample_weight = 0;
 static int dispense_amount = 0;
-
-static int weight = 0;
+static float weight = 0;
 
 static TimerHandle_t heartbeat_timer;
 
@@ -154,6 +166,27 @@ static esp_err_t event_handler(void *ctx, system_event_t *event)
         break;
     }
     return ESP_OK;
+}
+
+
+unsigned long IRAM_ATTR micros()
+{
+    return (unsigned long) (esp_timer_get_time());
+}
+void IRAM_ATTR delayMicroseconds(uint32_t us)
+{
+    uint32_t m = micros();
+    if(us){
+        uint32_t e = (m + us);
+        if(m > e){ //overflow
+            while(micros() > e){
+                NOP();
+            }
+        }
+        while(micros() < e){
+            NOP();
+        }
+    }
 }
 
 void parse_json(void* params)
@@ -273,7 +306,8 @@ void parse_json(void* params)
 static void mcpwm_example_gpio_initialize()
 {
     printf("initializing mcpwm servo control gpio......\n");
-    mcpwm_gpio_init(MCPWM_UNIT_0, MCPWM0A, 18);    //Set GPIO 18 as PWM0A, to which servo is connected
+    mcpwm_gpio_init(MCPWM_UNIT_0, MCPWM0A, SRV0);  
+    mcpwm_gpio_init(MCPWM_UNIT_0, MCPWM0B, SRV1);  
 }
 
 static uint32_t servo_per_degree_init(uint32_t degree_of_rotation)
@@ -292,24 +326,33 @@ void heartbeat_timeout(TimerHandle_t xTimer)
 
 void dispense_task(void* params)
 {
-    uint32_t pw = 0;
+    uint32_t pwA = 0;
+    uint32_t pwB = 0;
     char id = 'd';
     while(1)
     {
         if(time_dispense)
         {
             ESP_LOGI(TAG, "Dispensing %d grams of food", dispense_amount);
+            gpio_set_level(SRV_EN, 1);
             
-            pw = servo_per_degree_init(SERVO_MAX_DEGREE);
-            mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, pw);
+            pwA = servo_per_degree_init(SERVO_MAX_DEGREE);
+            pwB = servo_per_degree_init(0);
+            mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, pwA);
+            mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_B, pwB);
             vTaskDelay(1000/portTICK_RATE_MS); //TODO: read adc until desired weight
             pw = servo_per_degree_init(0);
-            mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, pw);
+            pwB = servo_per_degree_init(SERVO_MAX_DEGREE);
+            mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, pwA);
+            mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_B, pwB);
            
             time_dispense = 0;
             xQueueSend(tx_queue, (void*)&id, (TickType_t)0);
+            vTaskDelay(2);
+            gpio_set_level(SRV_EN, 0);
         }
         
+        mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, pw);
         vTaskDelay(1000/portTICK_RATE_MS);
             
     }
@@ -318,14 +361,58 @@ void dispense_task(void* params)
 void weight_task(void* params)
 {
     char id = 'w';
+    char cycles;
+    char iter;
+    int reading;
+    float reading_f;
+    float iter_f;
+    float grams;
+    
     while(1)
     {
         if(sample_weight)
         {
-            //TODO implement ADC sampling
-            ESP_LOGI(TAG, "Reading weight sensor: %d", weight);
-            xQueueSend(tx_queue, (void*)&id, (TickType_t)0);
-            sample_weight = 0;
+            reading = 0;
+            weight = 0;
+            gpio_set_level(WS_EN, 1);
+            vTaskDelay(1);
+            
+           // for(iter = 0; iter < 64; iter++)
+            //{
+            
+                while(gpio_get_level(WS_DT))
+                {
+                    ESP_LOGW(TAG, "GPIO Level: %d", gpio_get_level(WS_DT));
+                    delayMicroseconds(1);
+                }
+                for(cycles = 0; cycles < 24; cycles++)
+                {
+                    gpio_set_level(WS_SCK, 1);
+                    //delayMicroseconds(1);
+                    gpio_set_level(WS_SCK, 0);
+                    reading |= (gpio_get_level(WS_DT)<<(23-cycles));
+                    //delayMicroseconds(1);        
+                }
+                
+                gpio_set_level(WS_SCK, 1);
+                //delayMicroseconds(1);
+                gpio_set_level(WS_SCK, 0);
+                
+                //average samples together;
+                reading_f = (float)reading;
+                iter_f = (float)iter;
+                weight = reading_f;
+                //weight = ((iter_f-1.0)/iter_f)*weight+(1.0/iter_f)*reading_f;
+            //}
+            
+            grams = (weight - WS_BASELINE)/(WS_BASELINE_GRAMS)*100.0;
+            ESP_LOGW(TAG, "Reading: %d", reading);
+            ESP_LOGI(TAG, "Reading weight sensor: %f", weight);
+            ESP_LOGI(TAG, "Weighr value in grams: %f", grams);
+            
+            sample_weight = 0;    
+            gpio_set_level(WS_EN, 0);
+            xQueueSend(tx_queue, (void*)&id, (TickType_t)0);        
         }
         
         vTaskDelay(1000/portTICK_RATE_MS);
@@ -577,6 +664,35 @@ void app_main()
     pwm_config.duty_mode = MCPWM_DUTY_MODE_0;
     mcpwm_init(MCPWM_UNIT_0, MCPWM_TIMER_0, &pwm_config);    //Configure PWM0A & PWM0B with above settings
     
+    gpio_config_t io_conf;
+    
+    //disable interrupt
+    io_conf.intr_type = GPIO_PIN_INTR_DISABLE;
+    //set as output mode
+    io_conf.mode = GPIO_MODE_OUTPUT;
+    //bit mask of the pins that you want to set,
+    io_conf.pin_bit_mask = (1ULL<<WS_EN | 1ULL<<SRV_EN | 1ULL<<WS_SCK);
+    //disable pull-down mode
+    io_conf.pull_down_en = 0;
+    //disable pull-up mode
+    io_conf.pull_up_en = 0;
+    //configure GPIO with the given settings
+    gpio_config(&io_conf);
+    
+    
+    //bit mask of the pins
+    io_conf.pin_bit_mask = (1ULL<<WS_DT);
+    //set as input mode    
+    io_conf.mode = GPIO_MODE_INPUT;
+    //disable pull-up mode
+    io_conf.pull_up_en = 1;
+    //disable pull-down mode
+    io_conf.pull_down_en = 0;
+    gpio_config(&io_conf);
+    
+    gpio_set_level(WS_SCK, 0);
+    gpio_set_level(WS_EN, 0);
+    gpio_set_level(SRV_EN, 0);
     
 	heartbeat_timer = xTimerCreate("heartbeat_timer", pdMS_TO_TICKS(900000), pdTRUE, (void*) 0, heartbeat_timeout);
 
@@ -587,5 +703,6 @@ void app_main()
     xTaskCreate(&parse_json, "parse_json_task", 5000, NULL, 4, NULL);
     
     xTaskCreate(&dispense_task, "dispenser_task", 2000, NULL, 4, NULL);
-    xTaskCreate(&weight_task, "weight_task", 2000, NULL, 4, NULL);
+    xTaskCreate(&weight_task, "weight_task", 2000, NULL, 6, NULL);
+    
 }

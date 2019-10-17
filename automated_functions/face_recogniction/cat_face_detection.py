@@ -22,7 +22,6 @@ def show(f):
         cv2.putText(img, 'Cat', (x, y - 7), 3, 1.2, (0, 255, 0), 2, cv2.LINE_AA)
 
     cv2.imshow('Cat?', img)
-    cv2.imwrite("cat33.jpg", img)
     c = cv2.waitKey(0)
 
 

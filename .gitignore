@@ -329,3 +329,4 @@ TSWLatexianTemp*
 espressif_code/.DS_Store
 .DS_Store
 .idea
+*.pyc

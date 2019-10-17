@@ -51,4 +51,4 @@ if __name__ == '__main__':
     except IndexError:
         f = "../face_recogniction/cat1.png"
 
-    crop(f=f)
+    show(f=f)

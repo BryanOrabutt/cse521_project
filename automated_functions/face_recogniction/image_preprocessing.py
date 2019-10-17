@@ -1,21 +1,13 @@
-#Load and show an image with Pillow
-from PIL import Image
+import cv2
+import sys
 import numpy as np
-import matplotlib.pyplot as plt
+import automated_functions.face_detection.cat_face_detection as detect
 
 #Load the image
-img = Image.open('cat1.png')
+f= sys.argv[1]
 
-#Get basic details about the image
-# print(img.format)
-# print(img.mode)
-# print(img.size)
-print(img)
+face_cropped = detect.crop(f)
 
-pix = np.array(img.convert('L'))
 
-print(pix)
 
-#show the image
-plt.imshow(pix, cmap=plt.cm.gray)
-plt.show()
+

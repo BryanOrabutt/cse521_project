@@ -34,6 +34,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
+#include "freertos/timers.h"
 
 #include "esp_system.h"
 #include "esp_wifi.h"
@@ -43,6 +44,8 @@
 #include "driver/sdmmc_host.h"
 
 #include "driver/gpio.h"
+#include "driver/ledc.h"
+#include "esp_attr.h"
 
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -52,9 +55,6 @@
 #include "aws_iot_version.h"
 #include "aws_iot_mqtt_client_interface.h"
 
-#include "driver/mcpwm.h"
-#include "soc/mcpwm_reg.h"
-#include "soc/mcpwm_struct.h"
 
 #include "../../json/cJSON/cJSON.h"
 
@@ -82,10 +82,11 @@ const static int serial_num = 123456;
 #define EXAMPLE_WIFI_PASS CONFIG_WIFI_PASSWORD
 
 
-//You can get these value from the datasheet of servo you use, in general pulse width varies between 1000 to 2000 mocrosecond
 #define SERVO_MIN_PULSEWIDTH 500 //Minimum pulse width in microsecond
 #define SERVO_MAX_PULSEWIDTH 2500 //Maximum pulse width in microsecond
 #define SERVO_MAX_DEGREE 180 //Maximum angle in degree upto which servo can rotate
+#define SERVO_PERIOD 20000.0
+#define MAX_TIMER 32767
 
 /* FreeRTOS event group to signal when we are connected & ready to make a request */
 static EventGroupHandle_t wifi_event_group;
@@ -124,15 +125,20 @@ static const char * DEVICE_CERTIFICATE_PATH = CONFIG_EXAMPLE_CERTIFICATE_PATH;
 static const char * DEVICE_PRIVATE_KEY_PATH = CONFIG_EXAMPLE_PRIVATE_KEY_PATH;
 static const char * ROOT_CA_PATH = CONFIG_EXAMPLE_ROOT_CA_PATH;
 
-
 #else
 #error "Invalid method for loading certs"
 #endif
+
+const static float SERVO_MAX_DUTY = (float)SERVO_MAX_PULSEWIDTH/SERVO_PERIOD;
+const static float SERVO_MIN_DUTY = (float)SERVO_MIN_PULSEWIDTH/SERVO_PERIOD;
+static ledc_timer_config_t timer_conf;
+static ledc_channel_config_t ledc_conf;
 
 static char time_dispense = 0;
 static char sample_weight = 0;
 static int dispense_amount = 0;
 static float weight = 0;
+static volatile int count = 0;
 
 static TimerHandle_t heartbeat_timer;
 
@@ -166,27 +172,6 @@ static esp_err_t event_handler(void *ctx, system_event_t *event)
         break;
     }
     return ESP_OK;
-}
-
-
-unsigned long IRAM_ATTR micros()
-{
-    return (unsigned long) (esp_timer_get_time());
-}
-void IRAM_ATTR delayMicroseconds(uint32_t us)
-{
-    uint32_t m = micros();
-    if(us){
-        uint32_t e = (m + us);
-        if(m > e){ //overflow
-            while(micros() > e){
-                NOP();
-            }
-        }
-        while(micros() < e){
-            NOP();
-        }
-    }
 }
 
 void parse_json(void* params)
@@ -303,19 +288,6 @@ void parse_json(void* params)
     }
 }
 
-static void mcpwm_example_gpio_initialize()
-{
-    printf("initializing mcpwm servo control gpio......\n");
-    mcpwm_gpio_init(MCPWM_UNIT_0, MCPWM0A, SRV0);  
-    mcpwm_gpio_init(MCPWM_UNIT_0, MCPWM0B, SRV1);  
-}
-
-static uint32_t servo_per_degree_init(uint32_t degree_of_rotation)
-{
-    uint32_t cal_pulsewidth = 0;
-    cal_pulsewidth = (SERVO_MIN_PULSEWIDTH + (((SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) * (degree_of_rotation)) / (SERVO_MAX_DEGREE)));
-    return cal_pulsewidth;
-}
 
 void heartbeat_timeout(TimerHandle_t xTimer)
 {
@@ -324,10 +296,19 @@ void heartbeat_timeout(TimerHandle_t xTimer)
     xTimerReset(heartbeat_timer, 10);
 }
 
+uint32_t calculate_duty(uint32_t angle)
+{
+    float duty = SERVO_MIN_DUTY + (((SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) * (angle)) / (SERVO_MAX_DEGREE))/SERVO_PERIOD;
+    
+    duty = (float)MAX_TIMER*duty;
+    uint32_t duty_int = (uint32_t)duty;
+    
+    return duty_int;
+}
+
 void dispense_task(void* params)
 {
-    uint32_t pwA = 0;
-    uint32_t pwB = 0;
+    uint32_t timer_duty;
     char id = 'd';
     while(1)
     {
@@ -336,23 +317,31 @@ void dispense_task(void* params)
             ESP_LOGI(TAG, "Dispensing %d grams of food", dispense_amount);
             gpio_set_level(SRV_EN, 1);
             
-            pwA = servo_per_degree_init(SERVO_MAX_DEGREE);
-            pwB = servo_per_degree_init(0);
-            mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, pwA);
-            mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_B, pwB);
-            vTaskDelay(1000/portTICK_RATE_MS); //TODO: read adc until desired weight
-            pw = servo_per_degree_init(0);
-            pwB = servo_per_degree_init(SERVO_MAX_DEGREE);
-            mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, pwA);
-            mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_B, pwB);
+            for (count = 0; count < SERVO_MAX_DEGREE; count++) 
+            {
+                timer_duty = calculate_duty(count);
+                ledc_conf.duty = timer_duty;
+                ESP_LOGW(TAG, "Timer val: %d", timer_duty);
+                ledc_channel_config(&ledc_conf);
+                vTaskDelay(10);    
+            }
+            
+            vTaskDelay(10000/portTICK_RATE_MS);        
+            
+            for (count = SERVO_MAX_DEGREE; count >= 0; count--) 
+            {
+                timer_duty = calculate_duty(count);
+                ledc_conf.duty = timer_duty;
+                ESP_LOGW(TAG, "Timer val: %d", timer_duty);
+                ledc_channel_config(&ledc_conf);
+                vTaskDelay(10);     
+            }
            
             time_dispense = 0;
             xQueueSend(tx_queue, (void*)&id, (TickType_t)0);
-            vTaskDelay(2);
             gpio_set_level(SRV_EN, 0);
         }
         
-        mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, pw);
         vTaskDelay(1000/portTICK_RATE_MS);
             
     }
@@ -380,7 +369,7 @@ void weight_task(void* params)
            // for(iter = 0; iter < 64; iter++)
             //{
             
-                while(gpio_get_level(WS_DT))
+            /*while(gpio_get_level(WS_DT))
                 {
                     ESP_LOGW(TAG, "GPIO Level: %d", gpio_get_level(WS_DT));
                     delayMicroseconds(1);
@@ -392,7 +381,9 @@ void weight_task(void* params)
                     gpio_set_level(WS_SCK, 0);
                     reading |= (gpio_get_level(WS_DT)<<(23-cycles));
                     //delayMicroseconds(1);        
-                }
+                }*/
+            
+                vTaskDelay(10);
                 
                 gpio_set_level(WS_SCK, 1);
                 //delayMicroseconds(1);
@@ -651,18 +642,21 @@ void app_main()
         ESP_LOGE(TAG, "Failed to create message queue");
     }
 
-	//1. mcpwm gpio initialization
-    mcpwm_example_gpio_initialize();
-
-    //2. initial mcpwm configuration
-    printf("Configuring Initial Parameters of mcpwm......\n");
-    mcpwm_config_t pwm_config;
-    pwm_config.frequency = 50;    //frequency = 50Hz, i.e. for every servo motor time period should be 20ms
-    pwm_config.cmpr_a = 0;    //duty cycle of PWMxA = 0
-    pwm_config.cmpr_b = 0;    //duty cycle of PWMxb = 0
-    pwm_config.counter_mode = MCPWM_UP_COUNTER;
-    pwm_config.duty_mode = MCPWM_DUTY_MODE_0;
-    mcpwm_init(MCPWM_UNIT_0, MCPWM_TIMER_0, &pwm_config);    //Configure PWM0A & PWM0B with above settings
+    //configure high speed PWM timer
+    timer_conf.duty_resolution = LEDC_TIMER_15_BIT;
+    timer_conf.freq_hz = 50;
+    timer_conf.speed_mode = LEDC_HIGH_SPEED_MODE;
+    timer_conf.timer_num = LEDC_TIMER_0;
+    ledc_timer_config(&timer_conf);
+    
+    //configure high speed PWM channel
+    ledc_conf.channel = LEDC_CHANNEL_0;
+    ledc_conf.duty = 0;
+    ledc_conf.gpio_num = 18;
+    ledc_conf.intr_type = LEDC_INTR_DISABLE;
+    ledc_conf.speed_mode = LEDC_HIGH_SPEED_MODE;
+    ledc_conf.timer_sel = LEDC_TIMER_0;
+    ledc_channel_config(&ledc_conf);
     
     gpio_config_t io_conf;
     
@@ -702,7 +696,7 @@ void app_main()
     ESP_LOGI(TAG, "Creating JSON parsing task");
     xTaskCreate(&parse_json, "parse_json_task", 5000, NULL, 4, NULL);
     
-    xTaskCreate(&dispense_task, "dispenser_task", 2000, NULL, 4, NULL);
-    xTaskCreate(&weight_task, "weight_task", 2000, NULL, 6, NULL);
+    xTaskCreate(&dispense_task, "dispenser_task", 2000, NULL, 6, NULL);
+    xTaskCreate(&weight_task, "weight_task", 2000, NULL, 4, NULL);
     
 }

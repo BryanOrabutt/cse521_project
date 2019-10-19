@@ -138,7 +138,6 @@ static char time_dispense = 0;
 static char sample_weight = 0;
 static int dispense_amount = 0;
 static float weight = 0;
-static volatile int count = 0;
 
 static TimerHandle_t heartbeat_timer;
 
@@ -310,6 +309,7 @@ void dispense_task(void* params)
 {
     uint32_t timer_duty;
     char id = 'd';
+    int32_t count;
     while(1)
     {
         if(time_dispense)

@@ -42,6 +42,7 @@
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
 #include "driver/sdmmc_host.h"
+#include "esp_intr_alloc.h"
 
 #include "driver/gpio.h"
 #include "driver/ledc.h"
@@ -68,6 +69,9 @@
 #define AMP_EN 22
 #define SRV0 18
 #define SRV1 19
+
+#define PWM_CHANNEL LEDC_CHANNEL_7
+#define PWM_TIMER LEDC_TIMER_3
 
 static const char *TAG = "pet-feeder";
 const static int serial_num = 123456;
@@ -307,10 +311,10 @@ uint32_t calculate_duty(uint32_t angle)
 
 void dispense_task(void* params)
 {
-    uint32_t timer_duty;
+    volatile uint32_t timer_duty;
     char id = 'd';
-    int32_t count;
-    while(1)
+    volatile int32_t count;
+    while(1) 
     {
         if(time_dispense)
         {
@@ -320,10 +324,13 @@ void dispense_task(void* params)
             for (count = 0; count < SERVO_MAX_DEGREE; count++) 
             {
                 timer_duty = calculate_duty(count);
-                ledc_conf.duty = timer_duty;
+                //ledc_conf.duty = timer_duty;/*
                 ESP_LOGW(TAG, "Timer val: %d", timer_duty);
-                ledc_channel_config(&ledc_conf);
-                vTaskDelay(10);    
+                ledc_set_duty_and_update(LEDC_HIGH_SPEED_MODE, PWM_CHANNEL, timer_duty, 0);
+                //ledc_set_duty(LEDC_HIGH_SPEED_MODE, PWM_CHANNEL, timer_duty);
+                //ledc_update_duty(LEDC_HIGH_SPEED_MODE, PWM_CHANNEL);
+                //ledc_channel_config(&ledc_conf);
+                vTaskDelay(2/portTICK_RATE_MS);    
             }
             
             vTaskDelay(10000/portTICK_RATE_MS);        
@@ -331,10 +338,13 @@ void dispense_task(void* params)
             for (count = SERVO_MAX_DEGREE; count >= 0; count--) 
             {
                 timer_duty = calculate_duty(count);
-                ledc_conf.duty = timer_duty;
+                //ledc_conf.duty = timer_duty;/*
                 ESP_LOGW(TAG, "Timer val: %d", timer_duty);
-                ledc_channel_config(&ledc_conf);
-                vTaskDelay(10);     
+                ledc_set_duty_and_update(LEDC_HIGH_SPEED_MODE, PWM_CHANNEL, timer_duty, 0);
+                //ledc_set_duty(LEDC_HIGH_SPEED_MODE, PWM_CHANNEL, timer_duty);
+                //ledc_update_duty(LEDC_HIGH_SPEED_MODE, PWM_CHANNEL);
+                ////ledc_channel_config(&ledc_conf);
+                vTaskDelay(2/portTICK_RATE_MS);     
             }
            
             time_dispense = 0;
@@ -397,9 +407,9 @@ void weight_task(void* params)
             //}
             
             grams = (weight - WS_BASELINE)/(WS_BASELINE_GRAMS)*100.0;
-            ESP_LOGW(TAG, "Reading: %d", reading);
-            ESP_LOGI(TAG, "Reading weight sensor: %f", weight);
-            ESP_LOGI(TAG, "Weighr value in grams: %f", grams);
+//             ESP_LOGW(TAG, "Reading: %d", reading);
+//             ESP_LOGI(TAG, "Reading weight sensor: %f", weight);
+//             ESP_LOGI(TAG, "Weighr value in grams: %f", grams);
             
             sample_weight = 0;    
             gpio_set_level(WS_EN, 0);
@@ -646,17 +656,19 @@ void app_main()
     timer_conf.duty_resolution = LEDC_TIMER_15_BIT;
     timer_conf.freq_hz = 50;
     timer_conf.speed_mode = LEDC_HIGH_SPEED_MODE;
-    timer_conf.timer_num = LEDC_TIMER_0;
+    timer_conf.timer_num = PWM_TIMER;
     ledc_timer_config(&timer_conf);
     
     //configure high speed PWM channel
-    ledc_conf.channel = LEDC_CHANNEL_0;
+    ledc_conf.channel = PWM_CHANNEL;
     ledc_conf.duty = 0;
-    ledc_conf.gpio_num = 18;
+    ledc_conf.gpio_num = SRV0;
     ledc_conf.intr_type = LEDC_INTR_DISABLE;
     ledc_conf.speed_mode = LEDC_HIGH_SPEED_MODE;
-    ledc_conf.timer_sel = LEDC_TIMER_0;
+    ledc_conf.timer_sel = PWM_TIMER;
     ledc_channel_config(&ledc_conf);
+    
+    ledc_fade_func_install(ESP_INTR_FLAG_LEVEL1);
     
     gpio_config_t io_conf;
     
@@ -696,7 +708,7 @@ void app_main()
     ESP_LOGI(TAG, "Creating JSON parsing task");
     xTaskCreate(&parse_json, "parse_json_task", 5000, NULL, 4, NULL);
     
-    xTaskCreate(&dispense_task, "dispenser_task", 2000, NULL, 6, NULL);
-    xTaskCreate(&weight_task, "weight_task", 2000, NULL, 4, NULL);
+    xTaskCreate(&dispense_task, "dispenser_task", 5000, NULL, 6, NULL);
+    xTaskCreate(&weight_task, "weight_task", 5000, NULL, 4, NULL);
     
 }

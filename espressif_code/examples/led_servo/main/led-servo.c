@@ -48,7 +48,7 @@ void servo_task(void* params)
             printf("duty: %d \n", timer_duty);
             ledc_conf.duty = timer_duty;
             ledc_channel_config(&ledc_conf);
-            vTaskDelay(2;     //Add delay, since it takes time for servo to rotate, generally 100ms/60degree rotation at 5V
+            vTaskDelay(2);     //Add delay, since it takes time for servo to rotate, generally 100ms/60degree rotation at 5V
         }
         for (count = SERVO_MAX_DEGREE; count >= 0; count--) 
         {

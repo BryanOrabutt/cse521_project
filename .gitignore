@@ -330,3 +330,11 @@ espressif_code/.DS_Store
 .DS_Store
 .idea
 *.pyc
+
+# Certs
+*.pem
+*.crt
+*.key
+
+# Build
+build/

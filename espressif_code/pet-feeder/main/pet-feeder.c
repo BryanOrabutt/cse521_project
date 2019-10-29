@@ -357,6 +357,27 @@ void dispense_task(void* params)
     }
 }
 
+unsigned long IRAM_ATTR micros()
+{
+    return (unsigned long) (esp_timer_get_time());
+}
+
+void IRAM_ATTR delayMicroseconds(uint32_t us)
+{
+    uint32_t m = micros();
+    if(us){
+        uint32_t e = (m + us);
+        if(m > e){ //overflow
+            while(micros() > e){
+                NOP();
+            }
+        }
+        while(micros() < e){
+            NOP();
+        }
+    }
+}
+
 void weight_task(void* params)
 {
     char id = 'w';
@@ -374,42 +395,44 @@ void weight_task(void* params)
             reading = 0;
             weight = 0;
             gpio_set_level(WS_EN, 1);
-            vTaskDelay(1);
+            delayMicroseconds(1);
+            //vTaskDelay(1);
             
-           // for(iter = 0; iter < 64; iter++)
-            //{
+       // for(iter = 0; iter < 8; iter++)
+        //{
             
-            /*while(gpio_get_level(WS_DT))
-                {
-                    ESP_LOGW(TAG, "GPIO Level: %d", gpio_get_level(WS_DT));
-                    delayMicroseconds(1);
-                }
-                for(cycles = 0; cycles < 24; cycles++)
-                {
-                    gpio_set_level(WS_SCK, 1);
-                    //delayMicroseconds(1);
-                    gpio_set_level(WS_SCK, 0);
-                    reading |= (gpio_get_level(WS_DT)<<(23-cycles));
-                    //delayMicroseconds(1);        
-                }*/
+            //while(gpio_get_level(WS_DT))
+           // {
+           //     ESP_LOGW(TAG, "GPIO Level: %d", gpio_get_level(WS_DT));
+           //     delayMicroseconds(1);
+            //}
             
-                vTaskDelay(10);
-                
+            for(cycles = 0; cycles < 24; cycles++)
+            {
                 gpio_set_level(WS_SCK, 1);
-                //delayMicroseconds(1);
+                delayMicroseconds(1);
                 gpio_set_level(WS_SCK, 0);
-                
-                //average samples together;
-                reading_f = (float)reading;
-                iter_f = (float)iter;
-                weight = reading_f;
-                //weight = ((iter_f-1.0)/iter_f)*weight+(1.0/iter_f)*reading_f;
+                reading |= (gpio_get_level(WS_DT)<<(23-cycles));
+                delayMicroseconds(1);        
+            }
+        
+            //vTaskDelay(10);
+            
+            gpio_set_level(WS_SCK, 1);
+            delayMicroseconds(1);
+            gpio_set_level(WS_SCK, 0);
+            
+            //average samples together
+            reading_f = (float)reading;
+            //iter_f = (float)iter;
+            weight = reading_f;
+            //weight = ((iter_f-1.0)/iter_f)*weight+(1.0/iter_f)*reading_f;
             //}
             
             grams = (weight - WS_BASELINE)/(WS_BASELINE_GRAMS)*100.0;
-//             ESP_LOGW(TAG, "Reading: %d", reading);
-//             ESP_LOGI(TAG, "Reading weight sensor: %f", weight);
-//             ESP_LOGI(TAG, "Weighr value in grams: %f", grams);
+            ESP_LOGW(TAG, "Reading: %d", reading);
+            ESP_LOGI(TAG, "Reading weight sensor: %f", weight);
+            ESP_LOGI(TAG, "Weighr value in grams: %f", grams);
             
             sample_weight = 0;    
             gpio_set_level(WS_EN, 0);

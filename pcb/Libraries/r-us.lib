@@ -1,0 +1,18 @@
+EESchema-LIBRARY Version 2.3
+#encoding utf-8
+#
+# R-US
+#
+DEF ~R-US R 0 40 Y Y 1 F N
+F0 "R" -95 -130 60 H V C CNN
+F1 "R-US" -5 130 60 H I C CNN
+F2 "" 55 -350 60 H I C CNN
+F3 "" 55 -350 60 H I C CNN
+DRAW
+P 8 0 1 0 -125 0 -105 80 -65 -80 -25 80 15 -80 55 80 95 -90 115 0 N
+X ~ ~ -325 0 200 R 50 50 1 1 I
+X ~ ~ 315 0 200 L 50 50 1 1 I
+ENDDRAW
+ENDDEF
+#
+#End Library

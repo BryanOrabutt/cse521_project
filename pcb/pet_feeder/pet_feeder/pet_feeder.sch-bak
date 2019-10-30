@@ -804,10 +804,4 @@ Text Label 1300 6550 3    50   ~ 0
 SRV_EN
 Text Label 2500 4500 3    50   ~ 0
 SRV1_PWR
-Wire Wire Line
-	5300 5300 5700 5300
-Text Label 5700 5300 2    50   ~ 0
-WS_ADC
-Text Label 7550 3300 0    50   ~ 0
-WS_ADC
 $EndSCHEMATC

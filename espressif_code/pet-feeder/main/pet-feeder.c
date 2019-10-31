@@ -48,6 +48,9 @@
 #include "driver/ledc.h"
 #include "esp_attr.h"
 
+#include "driver/adc.h"
+#include "esp_adc_cal.h"
+
 #include "nvs.h"
 #include "nvs_flash.h"
 
@@ -63,9 +66,8 @@
 #define WS_BASELINE 400000.0
 #define WS_BASELINE_GRAMS 50.0
 #define WS_EN 21
+#define WS_ADC 34
 #define SRV_EN 17
-#define WS_SCK 2
-#define WS_DT 15
 #define AMP_EN 22
 #define SRV0 18
 #define SRV1 19
@@ -137,6 +139,11 @@ const static float SERVO_MAX_DUTY = (float)SERVO_MAX_PULSEWIDTH/SERVO_PERIOD;
 const static float SERVO_MIN_DUTY = (float)SERVO_MIN_PULSEWIDTH/SERVO_PERIOD;
 static ledc_timer_config_t timer_conf;
 static ledc_channel_config_t ledc_conf;
+
+static esp_adc_cal_characteristics_t *adc_chars;
+static const adc_channel_t channel = ADC_CHANNEL_6;     //GPIO34 if ADC1, GPIO14 if ADC2
+static const adc_atten_t atten = ADC_ATTEN_DB_11;
+static const adc_unit_t unit = ADC_UNIT_1;
 
 static char time_dispense = 0;
 static char sample_weight = 0;
@@ -384,58 +391,26 @@ void weight_task(void* params)
     char cycles;
     char iter;
     int reading;
-    float reading_f;
-    float iter_f;
-    float grams;
     
     while(1)
     {
         if(sample_weight)
         {
+            gpio_set_level(WS_EN, 0);
             reading = 0;
             weight = 0;
-            gpio_set_level(WS_EN, 1);
-            delayMicroseconds(1);
-            //vTaskDelay(1);
             
-       // for(iter = 0; iter < 8; iter++)
-        //{
+            delayMicroseconds(20);
             
-            //while(gpio_get_level(WS_DT))
-           // {
-           //     ESP_LOGW(TAG, "GPIO Level: %d", gpio_get_level(WS_DT));
-           //     delayMicroseconds(1);
-            //}
-            
-            for(cycles = 0; cycles < 24; cycles++)
+            for(iter = 0; iter < 64; iter++)
             {
-                gpio_set_level(WS_SCK, 1);
-                delayMicroseconds(1);
-                gpio_set_level(WS_SCK, 0);
-                reading |= (gpio_get_level(WS_DT)<<(23-cycles));
-                delayMicroseconds(1);        
+                reading += adc1_get_raw((adc1_channel_t)channel);
             }
-        
-            //vTaskDelay(10);
             
-            gpio_set_level(WS_SCK, 1);
-            delayMicroseconds(1);
-            gpio_set_level(WS_SCK, 0);
-            
-            //average samples together
-            reading_f = (float)reading;
-            //iter_f = (float)iter;
-            weight = reading_f;
-            //weight = ((iter_f-1.0)/iter_f)*weight+(1.0/iter_f)*reading_f;
-            //}
-            
-            grams = (weight - WS_BASELINE)/(WS_BASELINE_GRAMS)*100.0;
-            ESP_LOGW(TAG, "Reading: %d", reading);
-            ESP_LOGI(TAG, "Reading weight sensor: %f", weight);
-            ESP_LOGI(TAG, "Weighr value in grams: %f", grams);
-            
-            sample_weight = 0;    
-            gpio_set_level(WS_EN, 0);
+            reading /= 64;
+            weight = (float)reading;
+            gpio_set_level(WS_EN, 1);
+            sample_weight = 0;
             xQueueSend(tx_queue, (void*)&id, (TickType_t)0);        
         }
         
@@ -452,7 +427,6 @@ void iot_subscribe_callback_handler(AWS_IoT_Client *pClient, char *topicName, ui
     strncpy(msg, params->payload, params->payloadLen);
     strcat(msg, "\0");
     xQueueSend(rx_queue, (void*)msg, (TickType_t) 0);
-	//parse_json((char*)params->payload;
 }
 
 void disconnectCallbackHandler(AWS_IoT_Client *pClient, void *data) {
@@ -700,7 +674,7 @@ void app_main()
     //set as output mode
     io_conf.mode = GPIO_MODE_OUTPUT;
     //bit mask of the pins that you want to set,
-    io_conf.pin_bit_mask = (1ULL<<WS_EN | 1ULL<<SRV_EN | 1ULL<<WS_SCK);
+    io_conf.pin_bit_mask = (1ULL<<WS_EN | 1ULL<<SRV_EN);
     //disable pull-down mode
     io_conf.pull_down_en = 0;
     //disable pull-up mode
@@ -708,20 +682,19 @@ void app_main()
     //configure GPIO with the given settings
     gpio_config(&io_conf);
     
-    
-    //bit mask of the pins
-    io_conf.pin_bit_mask = (1ULL<<WS_DT);
-    //set as input mode    
-    io_conf.mode = GPIO_MODE_INPUT;
-    //disable pull-up mode
-    io_conf.pull_up_en = 1;
-    //disable pull-down mode
-    io_conf.pull_down_en = 0;
-    gpio_config(&io_conf);
-    
-    gpio_set_level(WS_SCK, 0);
-    gpio_set_level(WS_EN, 0);
+    gpio_set_level(WS_EN, 1);
     gpio_set_level(SRV_EN, 0);
+    
+    //Configure ADC
+    if (unit == ADC_UNIT_1) 
+    {
+        adc1_config_width(ADC_WIDTH_BIT_12);
+        adc1_config_channel_atten(channel, atten);
+    } 
+    else 
+    {
+        adc2_config_channel_atten((adc2_channel_t)channel, atten);
+    }
     
 	heartbeat_timer = xTimerCreate("heartbeat_timer", pdMS_TO_TICKS(900000), pdTRUE, (void*) 0, heartbeat_timeout);
 
@@ -729,9 +702,9 @@ void app_main()
     xTaskCreatePinnedToCore(&aws_iot_task, "aws_iot_task", 9516, NULL, 5, NULL, 1);
     
     ESP_LOGI(TAG, "Creating JSON parsing task");
-    xTaskCreate(&parse_json, "parse_json_task", 5000, NULL, 4, NULL);
+    xTaskCreate(&parse_json, "parse_json_task", 5000, NULL, 3, NULL);
     
-    xTaskCreate(&dispense_task, "dispenser_task", 5000, NULL, 6, NULL);
+    xTaskCreate(&dispense_task, "dispenser_task", 5000, NULL, 2, NULL);
     xTaskCreate(&weight_task, "weight_task", 5000, NULL, 4, NULL);
     
 }

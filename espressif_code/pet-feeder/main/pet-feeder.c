@@ -71,6 +71,7 @@
 #define AMP_EN 22
 #define SRV0 18
 #define SRV1 19
+#define MOTION 4
 
 #define PWM_CHANNEL LEDC_CHANNEL_7
 #define PWM_TIMER LEDC_TIMER_3
@@ -149,6 +150,10 @@ static char time_dispense = 0;
 static char sample_weight = 0;
 static int dispense_amount = 0;
 static float weight = 0;
+static xQueueHandle interrupt_queue = NULL;
+
+
+static TaskHandle_t weight_task_h, dispense_task_h;
 
 static TimerHandle_t heartbeat_timer;
 
@@ -230,6 +235,7 @@ void parse_json(void* params)
                         ESP_LOGI(TAG, "Dispense requested");
                         time_dispense = 1;
                         valid = 1;
+                        vTaskResume(dispense_task_h);
                     }
                     //set sample_weight flag for weight_sensor() vTask
                     else if(strncmp(item->valuestring, "weight", 10) == 0)
@@ -237,6 +243,7 @@ void parse_json(void* params)
                         ESP_LOGI(TAG, "Weight requested");
                         sample_weight = 1;
                         valid = 1;
+                        vTaskResume(weight_task_h);
                     }
                     //set invalid JSON
                     else
@@ -291,13 +298,30 @@ void parse_json(void* params)
                 ESP_LOGE(TAG, "Invalid request from AWS.\n");
             }
         }
-       /* else
-        {
-            ESP_LOGI(TAG, "xQueue empty");
-        }*/
+        vTaskDelay(10);
     }
 }
 
+static void IRAM_ATTR motion_isr(void* arg)
+{
+    uint32_t gpio_num = (uint32_t) arg;
+    xQueueSendFromISR(interrupt_queue, &gpio_num, NULL);
+}
+
+void motion_task(void* params)
+{
+    uint32_t io_num;
+    char id = 'm';
+    while(1)
+    {
+        if(xQueueReceive(interrupt_queue, &io_num, 10))
+        {
+            ESP_LOGI(TAG, "Motion tripped");
+            xQueueSend(tx_queue, (void*)&id, (TickType_t)0);
+        }
+        vTaskDelay(100);
+    }
+}
 
 void heartbeat_timeout(TimerHandle_t xTimer)
 {
@@ -359,7 +383,8 @@ void dispense_task(void* params)
             gpio_set_level(SRV_EN, 0);
         }
         
-        vTaskDelay(1000/portTICK_RATE_MS);
+        vTaskSuspend(0);
+        //vTaskDelay(1000/portTICK_RATE_MS);
             
     }
 }
@@ -414,7 +439,8 @@ void weight_task(void* params)
             xQueueSend(tx_queue, (void*)&id, (TickType_t)0);        
         }
         
-        vTaskDelay(1000/portTICK_RATE_MS);
+        vTaskSuspend(0);
+        //vTaskDelay(1000/portTICK_RATE_MS);
     }
 }
 
@@ -591,6 +617,11 @@ void aws_iot_task(void *param) {
                 data = cJSON_CreateString("ready");
                 cJSON_AddItemToObject(msg_for_aws, "status", data);
             }
+            else if(id == 'm')
+            {
+                data = cJSON_CreateNumber(1);
+                cJSON_AddItemToObject(msg_for_aws, "motion", data);
+            }
         }
         
         str = cJSON_Print(msg_for_aws);
@@ -682,8 +713,21 @@ void app_main()
     //configure GPIO with the given settings
     gpio_config(&io_conf);
     
+    //interrupt of rising edge
+    io_conf.intr_type = GPIO_PIN_INTR_POSEDGE;
+    //bit mask of the pins, use GPIO4/5 here
+    io_conf.pin_bit_mask = (1ULL<<MOTION);
+    //set as input mode    
+    io_conf.mode = GPIO_MODE_INPUT;
+    //enable pull-up mode
+    io_conf.pull_down_en = 1;
+    gpio_config(&io_conf);
+    
     gpio_set_level(WS_EN, 1);
     gpio_set_level(SRV_EN, 0);
+    
+    //create a queue to handle gpio event from isr
+    interrupt_queue = xQueueCreate(10, sizeof(uint32_t));
     
     //Configure ADC
     if (unit == ADC_UNIT_1) 
@@ -702,9 +746,15 @@ void app_main()
     xTaskCreatePinnedToCore(&aws_iot_task, "aws_iot_task", 9516, NULL, 5, NULL, 1);
     
     ESP_LOGI(TAG, "Creating JSON parsing task");
-    xTaskCreate(&parse_json, "parse_json_task", 5000, NULL, 3, NULL);
+    xTaskCreate(&parse_json, "parse_json_task", 5000, NULL, 4, NULL);
+    xTaskCreate(&motion_task, "motion_task", 2500, NULL, 3, NULL);
     
-    xTaskCreate(&dispense_task, "dispenser_task", 5000, NULL, 2, NULL);
-    xTaskCreate(&weight_task, "weight_task", 5000, NULL, 4, NULL);
+    xTaskCreate(&dispense_task, "dispenser_task", 5000, NULL, 2, &dispense_task_h);
+    xTaskCreate(&weight_task, "weight_task", 5000, NULL, 2, &weight_task_h);
     
+    //install gpio isr service
+    gpio_install_isr_service(0);
+    
+    //hook isr handler for specific gpio pin
+    gpio_isr_handler_add(MOTION, motion_isr, (void*) MOTION);
 }

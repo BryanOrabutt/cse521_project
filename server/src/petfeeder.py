@@ -5,6 +5,7 @@ from pytz import timezone
 import json
 from AWSIoTPythonSDK.MQTTLib import AWSIoTMQTTClient
 import logging
+import time
 
 valid_keys = ['weight','motion']
 
@@ -86,6 +87,8 @@ class PetFeeder:
 		msg_json = json.loads(message.payload)
 		valid = 0;
 		t = datetime.now().astimezone(timezone('utc'))
+		print("{}: JSON received from {}@{}:\n".format(t, self.serial_num, self.ip_addr))
+		print(json.dumps(msg_json))
 		if('heartbeat' in msg_json):
 			print("{}: Received heartbeat from {}@{}".format(t, self.serial_num, self.ip_addr))
 			valid = 1
@@ -135,4 +138,5 @@ if(__name__ == "__main__"):
 			json_string = "{\"request\":[\"weight\"]}"
 			data = json.loads(json_string)
 			uut.publish_msg(data)
+		time.sleep(0.5)
 

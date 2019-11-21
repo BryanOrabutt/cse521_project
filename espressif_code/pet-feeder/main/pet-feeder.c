@@ -73,8 +73,10 @@
 #define SRV1 19
 #define MOTION 4
 
-#define PWM_CHANNEL LEDC_CHANNEL_7
-#define PWM_TIMER LEDC_TIMER_3
+#define PWM_CHANNEL0 LEDC_CHANNEL_7
+#define PWM_CHANNEL1 LEDC_CHANNEL_6
+#define PWM_TIMER0 LEDC_TIMER_3
+#define PWM_TIMER1 LEDC_TIMER_3
 
 static const char *TAG = "pet-feeder";
 const static int serial_num = 123456;
@@ -89,8 +91,12 @@ const static int serial_num = 123456;
 #define EXAMPLE_WIFI_PASS CONFIG_WIFI_PASSWORD
 
 
-#define SERVO_MIN_PULSEWIDTH 500 //Minimum pulse width in microsecond
-#define SERVO_MAX_PULSEWIDTH 2500 //Maximum pulse width in microsecond
+#define SERVO_MIN_PULSEWIDTH 320 //Minimum pulse width in microsecond
+#define SERVO_MAX_PULSEWIDTH 2725//Maximum pulse width in microsecond
+#define SERVO_MIN_PULSEWIDTH0 320 //Minimum pulse width in microsecond
+#define SERVO_MAX_PULSEWIDTH0 2700//Maximum pulse width in microsecond
+#define SERVO_MIN_PULSEWIDTH1 320 //Minimum pulse width in microsecond
+#define SERVO_MAX_PULSEWIDTH1 2650 //Maximum pulse width in microsecond
 #define SERVO_MAX_DEGREE 180 //Maximum angle in degree upto which servo can rotate
 #define SERVO_PERIOD 20000.0
 #define MAX_TIMER 32767
@@ -136,8 +142,10 @@ static const char * ROOT_CA_PATH = CONFIG_EXAMPLE_ROOT_CA_PATH;
 #error "Invalid method for loading certs"
 #endif
 
-const static float SERVO_MAX_DUTY = (float)SERVO_MAX_PULSEWIDTH/SERVO_PERIOD;
-const static float SERVO_MIN_DUTY = (float)SERVO_MIN_PULSEWIDTH/SERVO_PERIOD;
+const static float SERVO_MAX_DUTY0 = (float)SERVO_MAX_PULSEWIDTH/SERVO_PERIOD;
+const static float SERVO_MAX_DUTY1 = (float)SERVO_MAX_PULSEWIDTH/SERVO_PERIOD;
+const static float SERVO_MIN_DUTY0 = (float)SERVO_MIN_PULSEWIDTH/SERVO_PERIOD;
+const static float SERVO_MIN_DUTY1 = (float)SERVO_MIN_PULSEWIDTH/SERVO_PERIOD;
 static ledc_timer_config_t timer_conf;
 static ledc_channel_config_t ledc_conf;
 
@@ -330,11 +338,21 @@ void heartbeat_timeout(TimerHandle_t xTimer)
     xTimerReset(heartbeat_timer, 10);
 }
 
-uint32_t calculate_duty(uint32_t angle)
+uint32_t calculate_duty(uint32_t angle, char motor)
 {
-    float duty = SERVO_MIN_DUTY + (((SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) * (angle)) / (SERVO_MAX_DEGREE))/SERVO_PERIOD;
+    float duty;
+    if(motor == 0)
+    {
+        duty = SERVO_MIN_DUTY0 + (((SERVO_MAX_PULSEWIDTH0 - SERVO_MIN_PULSEWIDTH0) * (angle)) / (SERVO_MAX_DEGREE))/SERVO_PERIOD;
     
-    duty = (float)MAX_TIMER*duty;
+        duty = (float)MAX_TIMER*duty;
+    }
+    else
+    {
+        duty = SERVO_MIN_DUTY1 + (((SERVO_MAX_PULSEWIDTH1 - SERVO_MIN_PULSEWIDTH1) * (angle)) / (SERVO_MAX_DEGREE))/SERVO_PERIOD;
+    
+        duty = (float)MAX_TIMER*duty;
+    }
     uint32_t duty_int = (uint32_t)duty;
     
     return duty_int;
@@ -342,7 +360,8 @@ uint32_t calculate_duty(uint32_t angle)
 
 void dispense_task(void* params)
 {
-    volatile uint32_t timer_duty;
+    uint32_t timer_duty0;
+    uint32_t timer_duty1;
     char id = 'd';
     volatile int32_t count;
     while(1) 
@@ -352,26 +371,28 @@ void dispense_task(void* params)
             ESP_LOGI(TAG, "Dispensing %d grams of food", dispense_amount);
             gpio_set_level(SRV_EN, 1);
             
-            for (count = 0; count < SERVO_MAX_DEGREE; count++) 
+            for (count = 0; count < SERVO_MAX_DEGREE-39; count+=5) 
             {
-                timer_duty = calculate_duty(count);
+                timer_duty0 = calculate_duty(count,0);
+                timer_duty1 = calculate_duty(SERVO_MAX_DEGREE-39-count,1);
                 //ledc_conf.duty = timer_duty;/*
-                ESP_LOGW(TAG, "Timer val: %d", timer_duty);
-                ledc_set_duty_and_update(LEDC_HIGH_SPEED_MODE, PWM_CHANNEL, timer_duty, 0);
+                ledc_set_duty_and_update(LEDC_HIGH_SPEED_MODE, PWM_CHANNEL0, timer_duty0, 0);
+                ledc_set_duty_and_update(LEDC_HIGH_SPEED_MODE, PWM_CHANNEL1, timer_duty1, 0);
                 //ledc_set_duty(LEDC_HIGH_SPEED_MODE, PWM_CHANNEL, timer_duty);
                 //ledc_update_duty(LEDC_HIGH_SPEED_MODE, PWM_CHANNEL);
                 //ledc_channel_config(&ledc_conf);
                 vTaskDelay(2/portTICK_RATE_MS);    
             }
             
-            vTaskDelay(10000/portTICK_RATE_MS);        
+            vTaskDelay(500/portTICK_RATE_MS);        
             
-            for (count = SERVO_MAX_DEGREE; count >= 0; count--) 
+            for (count = SERVO_MAX_DEGREE-39; count >= 0; count-=15) 
             {
-                timer_duty = calculate_duty(count);
+                timer_duty0 = calculate_duty(count,0);
+                timer_duty1 = calculate_duty(SERVO_MAX_DEGREE-39-count,1);
                 //ledc_conf.duty = timer_duty;/*
-                ESP_LOGW(TAG, "Timer val: %d", timer_duty);
-                ledc_set_duty_and_update(LEDC_HIGH_SPEED_MODE, PWM_CHANNEL, timer_duty, 0);
+                ledc_set_duty_and_update(LEDC_HIGH_SPEED_MODE, PWM_CHANNEL0, timer_duty0, 0);
+                ledc_set_duty_and_update(LEDC_HIGH_SPEED_MODE, PWM_CHANNEL1, timer_duty1, 0);
                 //ledc_set_duty(LEDC_HIGH_SPEED_MODE, PWM_CHANNEL, timer_duty);
                 //ledc_update_duty(LEDC_HIGH_SPEED_MODE, PWM_CHANNEL);
                 ////ledc_channel_config(&ledc_conf);
@@ -684,16 +705,31 @@ void app_main()
     timer_conf.duty_resolution = LEDC_TIMER_15_BIT;
     timer_conf.freq_hz = 50;
     timer_conf.speed_mode = LEDC_HIGH_SPEED_MODE;
-    timer_conf.timer_num = PWM_TIMER;
+    timer_conf.timer_num = PWM_TIMER0;
     ledc_timer_config(&timer_conf);
     
     //configure high speed PWM channel
-    ledc_conf.channel = PWM_CHANNEL;
+    ledc_conf.channel = PWM_CHANNEL0;
     ledc_conf.duty = 0;
     ledc_conf.gpio_num = SRV0;
     ledc_conf.intr_type = LEDC_INTR_DISABLE;
     ledc_conf.speed_mode = LEDC_HIGH_SPEED_MODE;
-    ledc_conf.timer_sel = PWM_TIMER;
+    ledc_conf.timer_sel = PWM_TIMER0;
+    ledc_channel_config(&ledc_conf);
+    
+    timer_conf.duty_resolution = LEDC_TIMER_15_BIT;
+    timer_conf.freq_hz = 50;
+    timer_conf.speed_mode = LEDC_HIGH_SPEED_MODE;
+    timer_conf.timer_num = PWM_TIMER1;
+    ledc_timer_config(&timer_conf);
+    
+    
+    ledc_conf.channel = PWM_CHANNEL1;
+    ledc_conf.duty = 0;
+    ledc_conf.gpio_num = SRV1;
+    ledc_conf.intr_type = LEDC_INTR_DISABLE;
+    ledc_conf.speed_mode = LEDC_HIGH_SPEED_MODE;
+    ledc_conf.timer_sel = PWM_TIMER1;
     ledc_channel_config(&ledc_conf);
     
     ledc_fade_func_install(ESP_INTR_FLAG_LEVEL1);
@@ -725,6 +761,7 @@ void app_main()
     
     gpio_set_level(WS_EN, 1);
     gpio_set_level(SRV_EN, 0);
+
     
     //create a queue to handle gpio event from isr
     interrupt_queue = xQueueCreate(10, sizeof(uint32_t));

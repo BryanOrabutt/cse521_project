@@ -46,18 +46,18 @@ void servo_task(void* params)
             printf("Angle of rotation: %d\n", count);
             timer_duty = calculate_duty(count);
             printf("duty: %d \n", timer_duty);
-            ledc_conf.duty = timer_duty;
-            ledc_channel_config(&ledc_conf);
-            vTaskDelay(2);     //Add delay, since it takes time for servo to rotate, generally 100ms/60degree rotation at 5V
+            ledc_set_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, timer_duty);
+            ledc_update_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0);
+            vTaskDelay(20/portTICK_RATE_MS);     //Add delay, since it takes time for servo to rotate, generally 100ms/60degree rotation at 5V
         }
         for (count = SERVO_MAX_DEGREE; count >= 0; count--) 
         {
             printf("Angle of rotation: %d\n", count);
             timer_duty = calculate_duty(count);
             printf("duty: %d\n", timer_duty);
-            ledc_conf.duty = timer_duty;
-            ledc_channel_config(&ledc_conf);
-            vTaskDelay(2);     //Add delay, since it takes time for servo to rotate, generally 100ms/60degree rotation at 5V
+            ledc_set_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, timer_duty);
+            ledc_update_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0);
+            vTaskDelay(20/portTICK_RATE_MS);     //Add delay, since it takes time for servo to rotate, generally 100ms/60degree rotation at 5V
         }
     }
 }

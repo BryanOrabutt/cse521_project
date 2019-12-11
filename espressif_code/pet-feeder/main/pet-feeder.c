@@ -42,10 +42,20 @@
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
 #include "driver/sdmmc_host.h"
+#include "esp_intr_alloc.h"
+#include "esp_sleep.h"
+#include "soc/rtc.h"
+#include "driver/rtc_io.h"
+#include "soc/rtc_cntl_reg.h"
+#include "soc/rtc.h"
 
 #include "driver/gpio.h"
 #include "driver/ledc.h"
+#include "driver/adc.h"
 #include "esp_attr.h"
+
+#include "driver/adc.h"
+#include "esp_adc_cal.h"
 
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -59,15 +69,20 @@
 #include "../../json/cJSON/cJSON.h"
 
 #define NOP() asm volatile ("nop")
-#define WS_BASELINE 400000.0
-#define WS_BASELINE_GRAMS 50.0
+#define WS_BASELINE 1077
+#define WS_GRAMS_PER_COUNT 0.0485608
 #define WS_EN 21
+#define WS_ADC 34
 #define SRV_EN 17
-#define WS_SCK 2
-#define WS_DT 15
 #define AMP_EN 22
 #define SRV0 18
 #define SRV1 19
+#define MOTION 4
+
+#define PWM_CHANNEL0 LEDC_CHANNEL_7
+#define PWM_CHANNEL1 LEDC_CHANNEL_6
+#define PWM_TIMER0 LEDC_TIMER_3
+#define PWM_TIMER1 LEDC_TIMER_3
 
 static const char *TAG = "pet-feeder";
 const static int serial_num = 123456;
@@ -82,8 +97,12 @@ const static int serial_num = 123456;
 #define EXAMPLE_WIFI_PASS CONFIG_WIFI_PASSWORD
 
 
-#define SERVO_MIN_PULSEWIDTH 500 //Minimum pulse width in microsecond
-#define SERVO_MAX_PULSEWIDTH 2500 //Maximum pulse width in microsecond
+#define SERVO_MIN_PULSEWIDTH 320 //Minimum pulse width in microsecond
+#define SERVO_MAX_PULSEWIDTH 2725//Maximum pulse width in microsecond
+#define SERVO_MIN_PULSEWIDTH0 320 //Minimum pulse width in microsecond
+#define SERVO_MAX_PULSEWIDTH0 2700//Maximum pulse width in microsecond
+#define SERVO_MIN_PULSEWIDTH1 320 //Minimum pulse width in microsecond
+#define SERVO_MAX_PULSEWIDTH1 2650 //Maximum pulse width in microsecond
 #define SERVO_MAX_DEGREE 180 //Maximum angle in degree upto which servo can rotate
 #define SERVO_PERIOD 20000.0
 #define MAX_TIMER 32767
@@ -98,6 +117,9 @@ const int CONNECTED_BIT = BIT0;
 
 static QueueHandle_t rx_queue;
 static QueueHandle_t tx_queue;
+
+static char rx_queue_empty = 0;
+static char tx_queue_empty = 0;
 
 /* CA Root certificate, device ("Thing") certificate and device
  * ("Thing") key.
@@ -129,15 +151,26 @@ static const char * ROOT_CA_PATH = CONFIG_EXAMPLE_ROOT_CA_PATH;
 #error "Invalid method for loading certs"
 #endif
 
-const static float SERVO_MAX_DUTY = (float)SERVO_MAX_PULSEWIDTH/SERVO_PERIOD;
-const static float SERVO_MIN_DUTY = (float)SERVO_MIN_PULSEWIDTH/SERVO_PERIOD;
+const static float SERVO_MAX_DUTY0 = (float)SERVO_MAX_PULSEWIDTH/SERVO_PERIOD;
+const static float SERVO_MAX_DUTY1 = (float)SERVO_MAX_PULSEWIDTH/SERVO_PERIOD;
+const static float SERVO_MIN_DUTY0 = (float)SERVO_MIN_PULSEWIDTH/SERVO_PERIOD;
+const static float SERVO_MIN_DUTY1 = (float)SERVO_MIN_PULSEWIDTH/SERVO_PERIOD;
 static ledc_timer_config_t timer_conf;
 static ledc_channel_config_t ledc_conf;
+
+static esp_adc_cal_characteristics_t *adc_chars;
+static const adc_channel_t channel = ADC_CHANNEL_6;     //GPIO34 if ADC1, GPIO14 if ADC2
+static const adc_atten_t atten = ADC_ATTEN_DB_11;
+static const adc_unit_t unit = ADC_UNIT_1;
 
 static char time_dispense = 0;
 static char sample_weight = 0;
 static int dispense_amount = 0;
 static float weight = 0;
+static xQueueHandle interrupt_queue = NULL;
+
+
+static TaskHandle_t weight_task_h, dispense_task_h;
 
 static TimerHandle_t heartbeat_timer;
 
@@ -219,6 +252,7 @@ void parse_json(void* params)
                         ESP_LOGI(TAG, "Dispense requested");
                         time_dispense = 1;
                         valid = 1;
+                        vTaskResume(dispense_task_h);
                     }
                     //set sample_weight flag for weight_sensor() vTask
                     else if(strncmp(item->valuestring, "weight", 10) == 0)
@@ -226,6 +260,7 @@ void parse_json(void* params)
                         ESP_LOGI(TAG, "Weight requested");
                         sample_weight = 1;
                         valid = 1;
+                        vTaskResume(weight_task_h);
                     }
                     //set invalid JSON
                     else
@@ -280,13 +315,35 @@ void parse_json(void* params)
                 ESP_LOGE(TAG, "Invalid request from AWS.\n");
             }
         }
-       /* else
+        else
         {
-            ESP_LOGI(TAG, "xQueue empty");
-        }*/
+            rx_queue_empty = 1;
+        }
+        vTaskDelay(10);
     }
 }
 
+static void IRAM_ATTR motion_isr(void* arg)
+{
+    uint32_t gpio_num = (uint32_t) arg;
+    xQueueSendFromISR(interrupt_queue, &gpio_num, NULL);
+}
+
+void motion_task(void* params)
+{
+    uint32_t io_num;
+    char id = 'm';
+    while(1)
+    {
+        if(xQueueReceive(interrupt_queue, &io_num, 10))
+        {
+            ESP_LOGI(TAG, "Motion tripped");
+            tx_queue_empty = 0;
+            xQueueSend(tx_queue, (void*)&id, (TickType_t)0);
+        }
+        vTaskDelay(100);
+    }
+}
 
 void heartbeat_timeout(TimerHandle_t xTimer)
 {
@@ -295,11 +352,44 @@ void heartbeat_timeout(TimerHandle_t xTimer)
     xTimerReset(heartbeat_timer, 10);
 }
 
-uint32_t calculate_duty(uint32_t angle)
+//copied from ESP32 Arduino library
+unsigned long IRAM_ATTR micros()
 {
-    float duty = SERVO_MIN_DUTY + (((SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) * (angle)) / (SERVO_MAX_DEGREE))/SERVO_PERIOD;
+    return (unsigned long) (esp_timer_get_time());
+}
+
+//copied from ESP32 Arduino library
+void IRAM_ATTR delayMicroseconds(uint32_t us)
+{
+    uint32_t m = micros();
+    if(us){
+        uint32_t e = (m + us);
+        if(m > e){ //overflow
+            while(micros() > e){
+                NOP();
+            }
+        }
+        while(micros() < e){
+            NOP();
+        }
+    }
+}
+
+uint32_t calculate_duty(uint32_t angle, char motor)
+{
+    float duty;
+    if(motor == 0)
+    {
+        duty = SERVO_MIN_DUTY0 + (((SERVO_MAX_PULSEWIDTH0 - SERVO_MIN_PULSEWIDTH0) * (angle)) / (SERVO_MAX_DEGREE))/SERVO_PERIOD;
     
-    duty = (float)MAX_TIMER*duty;
+        duty = (float)MAX_TIMER*duty;
+    }
+    else
+    {
+        duty = SERVO_MIN_DUTY1 + (((SERVO_MAX_PULSEWIDTH1 - SERVO_MIN_PULSEWIDTH1) * (angle)) / (SERVO_MAX_DEGREE))/SERVO_PERIOD;
+    
+        duty = (float)MAX_TIMER*duty;
+    }
     uint32_t duty_int = (uint32_t)duty;
     
     return duty_int;
@@ -307,42 +397,54 @@ uint32_t calculate_duty(uint32_t angle)
 
 void dispense_task(void* params)
 {
-    uint32_t timer_duty;
+    uint32_t timer_duty0;
+    uint32_t timer_duty1;
     char id = 'd';
-    int32_t count;
-    while(1)
+    volatile int32_t count;
+    while(1) 
     {
         if(time_dispense)
         {
             ESP_LOGI(TAG, "Dispensing %d grams of food", dispense_amount);
             gpio_set_level(SRV_EN, 1);
             
-            for (count = 0; count < SERVO_MAX_DEGREE; count++) 
+            for (count = 0; count < SERVO_MAX_DEGREE-39; count+=5) 
             {
-                timer_duty = calculate_duty(count);
-                ledc_conf.duty = timer_duty;
-                ESP_LOGW(TAG, "Timer val: %d", timer_duty);
-                ledc_channel_config(&ledc_conf);
-                vTaskDelay(10);    
+                timer_duty0 = calculate_duty(count,0);
+                timer_duty1 = calculate_duty(SERVO_MAX_DEGREE-39-count,1);
+                ledc_set_duty_and_update(LEDC_HIGH_SPEED_MODE, PWM_CHANNEL0, timer_duty0, 0);
+                ledc_set_duty_and_update(LEDC_HIGH_SPEED_MODE, PWM_CHANNEL1, timer_duty1, 0);
+                if(weight < ((float)dispense_amount))
+                {
+                    vTaskDelay(2/portTICK_RATE_MS);    
+                }
+                else
+                {
+                    break;
+                }
             }
             
-            vTaskDelay(10000/portTICK_RATE_MS);        
-            
-            for (count = SERVO_MAX_DEGREE; count >= 0; count--) 
+            while(weight < ((float)dispense_amount))
             {
-                timer_duty = calculate_duty(count);
-                ledc_conf.duty = timer_duty;
-                ESP_LOGW(TAG, "Timer val: %d", timer_duty);
-                ledc_channel_config(&ledc_conf);
-                vTaskDelay(10);     
+               delayMicroseconds(100);   
+            }     
+            
+            for (count = SERVO_MAX_DEGREE-39; count >= 0; count-=15) 
+            {
+                timer_duty0 = calculate_duty(count,0);
+                timer_duty1 = calculate_duty(SERVO_MAX_DEGREE-39-count,1);
+                ledc_set_duty_and_update(LEDC_HIGH_SPEED_MODE, PWM_CHANNEL0, timer_duty0, 0);
+                vTaskDelay(2/portTICK_RATE_MS);     
             }
            
             time_dispense = 0;
+            tx_queue_empty = 0;
             xQueueSend(tx_queue, (void*)&id, (TickType_t)0);
             gpio_set_level(SRV_EN, 0);
         }
         
-        vTaskDelay(1000/portTICK_RATE_MS);
+        vTaskSuspend(0);
+        //vTaskDelay(1000/portTICK_RATE_MS);
             
     }
 }
@@ -353,60 +455,32 @@ void weight_task(void* params)
     char cycles;
     char iter;
     int reading;
-    float reading_f;
-    float iter_f;
-    float grams;
     
     while(1)
     {
         if(sample_weight)
         {
-            reading = 0;
-            weight = 0;
-            gpio_set_level(WS_EN, 1);
-            vTaskDelay(1);
-            
-           // for(iter = 0; iter < 64; iter++)
-            //{
-            
-            /*while(gpio_get_level(WS_DT))
-                {
-                    ESP_LOGW(TAG, "GPIO Level: %d", gpio_get_level(WS_DT));
-                    delayMicroseconds(1);
-                }
-                for(cycles = 0; cycles < 24; cycles++)
-                {
-                    gpio_set_level(WS_SCK, 1);
-                    //delayMicroseconds(1);
-                    gpio_set_level(WS_SCK, 0);
-                    reading |= (gpio_get_level(WS_DT)<<(23-cycles));
-                    //delayMicroseconds(1);        
-                }*/
-            
-                vTaskDelay(10);
-                
-                gpio_set_level(WS_SCK, 1);
-                //delayMicroseconds(1);
-                gpio_set_level(WS_SCK, 0);
-                
-                //average samples together;
-                reading_f = (float)reading;
-                iter_f = (float)iter;
-                weight = reading_f;
-                //weight = ((iter_f-1.0)/iter_f)*weight+(1.0/iter_f)*reading_f;
-            //}
-            
-            grams = (weight - WS_BASELINE)/(WS_BASELINE_GRAMS)*100.0;
-            ESP_LOGW(TAG, "Reading: %d", reading);
-            ESP_LOGI(TAG, "Reading weight sensor: %f", weight);
-            ESP_LOGI(TAG, "Weighr value in grams: %f", grams);
-            
-            sample_weight = 0;    
             gpio_set_level(WS_EN, 0);
+            reading = 0;
+            sample_weight = 0;
+            
+            delayMicroseconds(20);
+            
+            for(iter = 0; iter < 64; iter++)
+            {
+                reading += adc1_get_raw((adc1_channel_t)channel);
+            }
+            
+            reading /= 64;
+            weight = ((float)(reading-WS_BASELINE))*WS_GRAMS_PER_COUNT;
+            gpio_set_level(WS_EN, 1);
+            sample_weight = 0;
+            tx_queue_empty = 0;
             xQueueSend(tx_queue, (void*)&id, (TickType_t)0);        
         }
         
-        vTaskDelay(1000/portTICK_RATE_MS);
+        vTaskSuspend(0);
+        //vTaskDelay(1000/portTICK_RATE_MS);
     }
 }
 
@@ -418,8 +492,8 @@ void iot_subscribe_callback_handler(AWS_IoT_Client *pClient, char *topicName, ui
     char msg[200];
     strncpy(msg, params->payload, params->payloadLen);
     strcat(msg, "\0");
+    rx_queue_empty = 0;
     xQueueSend(rx_queue, (void*)msg, (TickType_t) 0);
-	//parse_json((char*)params->payload;
 }
 
 void disconnectCallbackHandler(AWS_IoT_Client *pClient, void *data) {
@@ -448,9 +522,11 @@ void aws_iot_task(void *param) {
 
     //int32_t i = 0;
     cJSON* msg_for_aws = NULL;
+    cJSON* msg_for_motion = NULL;
     cJSON* data = NULL;
     char id;
     char* str;
+    char motion_flag = 0;
         
 
     IoT_Error_t rc = FAILURE;
@@ -540,8 +616,10 @@ void aws_iot_task(void *param) {
     }
 
     const char *TOPIC_PUB = "pet-feeder/to_aws";
+    const char *MOTION_PUB = "pet-feeder/motion";
     const char* TOPIC_SUB = "pet-feeder/from_aws";
     const int TOPIC_PUB_LEN = strlen(TOPIC_PUB);
+    const int MOTION_PUB_LEN = strlen(MOTION_PUB);
     const int TOPIC_SUB_LEN = strlen(TOPIC_SUB);
 
     ESP_LOGI(TAG, "Subscribing...");
@@ -568,8 +646,10 @@ void aws_iot_task(void *param) {
         vTaskDelay(5000 / portTICK_RATE_MS);
         
         msg_for_aws = cJSON_CreateObject();
+        msg_for_motion = cJSON_CreateObject();
         data = cJSON_CreateNumber(1);
         cJSON_AddItemToObject(msg_for_aws, "heartbeat", data);
+        
         
         while(xQueueReceive(tx_queue, &id, (TickType_t) 1))
         {
@@ -584,18 +664,41 @@ void aws_iot_task(void *param) {
                 data = cJSON_CreateString("ready");
                 cJSON_AddItemToObject(msg_for_aws, "status", data);
             }
+            else if(id == 'm')
+            {
+                data = cJSON_CreateNumber(1);
+                cJSON_AddItemToObject(msg_for_motion, "motion", data);
+                motion_flag = 1;
+            }
         }
+        
+        tx_queue_empty = 1;
         
         str = cJSON_Print(msg_for_aws);
         snprintf(cPayload, 100, "%s", str);
         paramsQOS0.payloadLen = strlen(cPayload);
         rc = aws_iot_mqtt_publish(&client, TOPIC_PUB, TOPIC_PUB_LEN, &paramsQOS0);
         
+        if(motion_flag)
+        {
+            motion_flag = 0;
+            str = cJSON_Print(msg_for_motion);
+            snprintf(cPayload, 100, "%s", str);
+            paramsQOS0.payloadLen = strlen(cPayload);
+            rc = aws_iot_mqtt_publish(&client, MOTION_PUB, MOTION_PUB_LEN, &paramsQOS0);
+        }
+        
         cJSON_Delete(msg_for_aws);
+        cJSON_Delete(msg_for_motion);
         
         if (rc == MQTT_REQUEST_TIMEOUT_ERROR) {
             ESP_LOGW(TAG, "QOS1 publish ack not received.");
             rc = SUCCESS;
+        }
+        
+        if(tx_queue_empty && rx_queue_empty)
+        {
+            esp_deep_sleep_start();
         }
     }
 
@@ -646,17 +749,34 @@ void app_main()
     timer_conf.duty_resolution = LEDC_TIMER_15_BIT;
     timer_conf.freq_hz = 50;
     timer_conf.speed_mode = LEDC_HIGH_SPEED_MODE;
-    timer_conf.timer_num = LEDC_TIMER_0;
+    timer_conf.timer_num = PWM_TIMER0;
     ledc_timer_config(&timer_conf);
     
     //configure high speed PWM channel
-    ledc_conf.channel = LEDC_CHANNEL_0;
+    ledc_conf.channel = PWM_CHANNEL0;
     ledc_conf.duty = 0;
-    ledc_conf.gpio_num = 18;
+    ledc_conf.gpio_num = SRV0;
     ledc_conf.intr_type = LEDC_INTR_DISABLE;
     ledc_conf.speed_mode = LEDC_HIGH_SPEED_MODE;
-    ledc_conf.timer_sel = LEDC_TIMER_0;
+    ledc_conf.timer_sel = PWM_TIMER0;
     ledc_channel_config(&ledc_conf);
+    
+    timer_conf.duty_resolution = LEDC_TIMER_15_BIT;
+    timer_conf.freq_hz = 50;
+    timer_conf.speed_mode = LEDC_HIGH_SPEED_MODE;
+    timer_conf.timer_num = PWM_TIMER1;
+    ledc_timer_config(&timer_conf);
+    
+    
+    ledc_conf.channel = PWM_CHANNEL1;
+    ledc_conf.duty = 0;
+    ledc_conf.gpio_num = SRV1;
+    ledc_conf.intr_type = LEDC_INTR_DISABLE;
+    ledc_conf.speed_mode = LEDC_HIGH_SPEED_MODE;
+    ledc_conf.timer_sel = PWM_TIMER1;
+    ledc_channel_config(&ledc_conf);
+    
+    ledc_fade_func_install(ESP_INTR_FLAG_LEVEL1);
     
     gpio_config_t io_conf;
     
@@ -665,7 +785,7 @@ void app_main()
     //set as output mode
     io_conf.mode = GPIO_MODE_OUTPUT;
     //bit mask of the pins that you want to set,
-    io_conf.pin_bit_mask = (1ULL<<WS_EN | 1ULL<<SRV_EN | 1ULL<<WS_SCK);
+    io_conf.pin_bit_mask = (1ULL<<WS_EN | 1ULL<<SRV_EN);
     //disable pull-down mode
     io_conf.pull_down_en = 0;
     //disable pull-up mode
@@ -673,20 +793,33 @@ void app_main()
     //configure GPIO with the given settings
     gpio_config(&io_conf);
     
-    
-    //bit mask of the pins
-    io_conf.pin_bit_mask = (1ULL<<WS_DT);
+    //interrupt of rising edge
+    io_conf.intr_type = GPIO_PIN_INTR_POSEDGE;
+    //bit mask of the pins, use GPIO4/5 here
+    io_conf.pin_bit_mask = (1ULL<<MOTION);
     //set as input mode    
     io_conf.mode = GPIO_MODE_INPUT;
-    //disable pull-up mode
-    io_conf.pull_up_en = 1;
-    //disable pull-down mode
-    io_conf.pull_down_en = 0;
+    //enable pull-up mode
+    io_conf.pull_down_en = 1;
     gpio_config(&io_conf);
     
-    gpio_set_level(WS_SCK, 0);
-    gpio_set_level(WS_EN, 0);
+    gpio_set_level(WS_EN, 1);
     gpio_set_level(SRV_EN, 0);
+
+    
+    //create a queue to handle gpio event from isr
+    interrupt_queue = xQueueCreate(10, sizeof(uint32_t));
+    
+    //Configure ADC
+    if (unit == ADC_UNIT_1) 
+    {
+        adc1_config_width(ADC_WIDTH_BIT_12);
+        adc1_config_channel_atten(channel, atten);
+    } 
+    else 
+    {
+        adc2_config_channel_atten((adc2_channel_t)channel, atten);
+    }
     
 	heartbeat_timer = xTimerCreate("heartbeat_timer", pdMS_TO_TICKS(900000), pdTRUE, (void*) 0, heartbeat_timeout);
 
@@ -695,8 +828,21 @@ void app_main()
     
     ESP_LOGI(TAG, "Creating JSON parsing task");
     xTaskCreate(&parse_json, "parse_json_task", 5000, NULL, 4, NULL);
+    xTaskCreate(&motion_task, "motion_task", 2500, NULL, 3, NULL);
     
-    xTaskCreate(&dispense_task, "dispenser_task", 2000, NULL, 6, NULL);
-    xTaskCreate(&weight_task, "weight_task", 2000, NULL, 4, NULL);
+    xTaskCreate(&dispense_task, "dispenser_task", 5000, NULL, 2, &dispense_task_h);
+    xTaskCreate(&weight_task, "weight_task", 5000, NULL, 2, &weight_task_h);
+    
+    //install gpio isr service
+    gpio_install_isr_service(0);
+    
+    //hook isr handler for specific gpio pin
+    gpio_isr_handler_add(MOTION, motion_isr, (void*) MOTION);
+    
+    esp_sleep_enable_timer_wakeup(5000000); //wakeup every 5 seconds;
+    rtc_gpio_pullup_en(SRV_EN);
+    rtc_gpio_pulldown_en(MOTION);
+    esp_sleep_enable_ext1_wakeup(GPIO_NUM_4, ESP_EXT1_WAKEUP_ANY_HIGH);
+    rtc_gpio_isolate(GPIO_NUM_12);
     
 }

@@ -22,7 +22,7 @@ def sub_cb(self):
 	sleep(1)
 	camera.capture('/home/pi/Desktop/gx_folder/image.jpg')
 	camera.stop_preview()
-	aws_client.publish(self.pub_topic, "message_received", 1)
+	aws_client.publish(self.pub_topic, "message_received", 0)
 
 
 ip_addr='a2ot5vs3yt7xtc-ats.iot.us-west-2.amazonaws.com'

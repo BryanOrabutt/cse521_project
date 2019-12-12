@@ -20,7 +20,7 @@ def show(f):
     for (x, y, w, h) in faces:
         cv2.rectangle(img, (x, y), (x + w, y + h), (0, 0, 255), 2)
         crop_img = img[y:y + h, x:x + w]
-        cv2.putText(img, 'Cat', (x, y - 7), 3, 1.2, (0, 255, 0), 2, cv2.LINE_AA)
+        cv2.putText(img, 'Flerken', (x, y - 7), 3, 1.2, (0, 255, 0), 2, cv2.LINE_AA)
 
     cv2.imshow('Cat?', img)
     cv2.imwrite(f"cut_{f}", crop_img)
@@ -50,6 +50,6 @@ if __name__ == '__main__':
     try:
         f = sys.argv[1]
     except IndexError:
-        f = "../face_recogniction/cat1.png"
+        f = "../data/cat3.jpg"
 
     show(f=f)

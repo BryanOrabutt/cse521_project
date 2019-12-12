@@ -9,7 +9,7 @@ from sklearn.model_selection import GridSearchCV
 
 import image_preprocessing
 
-cat_names = ['Fenek', 'Larry', 'Hank']
+cat_names = ['Cat1', 'Cat2', 'Cat3']
 
 # Load the images and class labels from files and split randomly into
 # training and test sets

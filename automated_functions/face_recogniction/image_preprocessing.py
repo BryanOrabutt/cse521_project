@@ -1,6 +1,6 @@
 import cv2
-import sys
-import cat_face_detection as detect
+from face_detection import cat_face_detection as detect
+
 
 #Load the image
 
